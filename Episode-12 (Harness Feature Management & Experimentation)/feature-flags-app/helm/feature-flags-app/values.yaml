@@ -1,0 +1,46 @@
+# ============================================
+# Change values HERE → templates use them automatically.
+# Harness resolves the artifact image at deploy time. No secret expressions here.
+# ============================================
+
+replicaCount: 2
+
+# Harness replaces <+artifact.image> with the full ECR URL:tag at deploy time
+image: <+artifact.image>
+pullPolicy: IfNotPresent
+
+# NOTE: The FME SDK key is NOT in this chart. A pipeline ShellScript step creates
+# the ff-secrets Kubernetes secret on the delegate before HelmDeploy, so there is
+# no secret expression in any Git-fetched file (avoids the Fetch Files error).
+
+service:
+  type: LoadBalancer
+  port: 80
+  targetPort: 3000
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "256Mi"
+    cpu: "250m"
+
+readinessProbe:
+  path: /health
+  port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+
+livenessProbe:
+  path: /health
+  port: 3000
+  initialDelaySeconds: 15
+  periodSeconds: 15
+  failureThreshold: 3
+
+# Kubernetes namespace (created by helm --create-namespace)
+namespace: feature-flags

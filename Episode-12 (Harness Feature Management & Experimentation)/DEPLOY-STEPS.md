@@ -1,0 +1,246 @@
+# Episode 12: Harness Feature Management & Experimentation (FME) — Deployment Steps
+
+## What We Are Doing
+
+Deploy an app once, then control a feature with an **FME feature flag** — turn it on for a user, then a % of users, then everyone, and off instantly if needed. No redeploy.
+
+```
+Deploy (treatment OFF) → one user ON → 10% ON → 100% ON → kill switch OFF
+```
+
+> **Note:** Your account uses **Feature Management & Experimentation (FME)** — the Split-based module (nav shows Rollout Board, Experiments, Segments, Metrics, FME Settings). FME uses the **Split SDK** (`@splitsoftware/splitio`) and "treatments" (`on`/`off`/`control`), not the old FF SDK.
+
+---
+
+## Prerequisites (Already Done)
+
+| What | Episode | Link |
+|------|---------|------|
+| Harness account + project | 1 | [Episode 1 — Step 2](../Episode-01/hello-world-app/DEPLOY-STEPS.md#step-2-open-harness) |
+| GitHub connector (`account.Github`) | 1 | [Episode 1 — Step 3](../Episode-01/hello-world-app/DEPLOY-STEPS.md#step-3-create-a-github-connector-first-time-only) |
+| AWS OIDC connector (`account.aws_account`) + ECR | 3 | [Episode 3 — Connector 3: AWS](../Episode-03/README.md#connector-3-aws--create-now-using-oidc--no-access-keys) |
+| EKS cluster + K8s Delegate | 6 | [Episode 6 — Step 3: Install Kubernetes Delegate](../Episode-06/gocart/DEPLOY-STEPS.md#step-3-install-kubernetes-delegate) |
+
+---
+
+# PART A — Set up FME (flag + SDK key)
+
+## Step 1: Open the FME Module
+
+1. Login to Harness → https://app.harness.io
+2. Module switcher (top-left grid) → select **Feature Management & Experimentation**
+3. Select your project (e.g. `Harness-CI-CD-Zero-to-Hero`)
+
+---
+
+## Step 2: Create an Environment
+
+1. Left nav → **FME Settings** → **Projects** → **Environments** tab
+2. Click **Create environment** (top-right)
+3. Name: `production`, Type: **Production** → **Create**
+4. You'll see it listed with an **ID** — click **Copy** to note the environment ID
+
+> FME flags are evaluated per environment — a flag can be ON in one env, OFF in another. (You may already have `production` / `Prod-...` / `Stg-...` environments listed.)
+
+---
+
+## Step 3: Create a Server-Side SDK Key
+
+1. **FME Settings** → **Projects** → **SDK API Keys** tab
+2. Click **Create** (SDK API Key)
+3. Fill in:
+   - Name: `fme-server-key`
+   - Environment: `production` (the same env where your flag will live)
+   - Type: **Server-side**
+4. Click **Create** → **copy the key now** (you'll paste it into the Harness Secret Manager in Step 5)
+
+> Server-side key = backend apps (our Node.js app). Client-side = browser/mobile. The key must belong to the SAME environment as the flag.
+
+---
+
+## Step 4: Store the SDK Key in the Harness Secret Manager
+
+Use the **built-in Harness Secret Manager** (no AWS SM, no ESO needed).
+
+1. Harness → **Project Settings → Secrets → + New Secret → Text**
+2. Secret Manager: **Harness Built-in Secret Manager** (default)
+3. Secret Name / ID: `harness_fme_sdk_key`
+4. Value: the **server-side SDK key** from Step 3 → **Save**
+
+> Flow: the pipeline's **"Create FME Secret"** ShellScript step pulls this via `<+secrets.getValue("harness_fme_sdk_key")>` on the delegate and creates the `ff-secrets` K8s secret → the pod reads `HARNESS_FME_SDK_KEY` from it. Masked in logs, never hardcoded.
+> **Why not inside the Helm chart?** Harness cannot resolve `<+secrets.getValue()>` inside a Git-fetched Helm `values.yaml` (fails at "Fetch Files"). Creating the secret in a ShellScript step on the delegate avoids this.
+
+---
+
+## Step 5: Create the Feature Flag
+
+1. **Feature Flags** → **Create feature flag**
+2. **Name:** `new_checkout_banner` (must match the code in `app.js`)
+3. **Traffic Type:** `user` → **Create**
+4. Open the flag → select the **production** environment → click **Initiate Environment**
+5. In **Treatments**, keep the two defaults: `on` and `off`
+6. Under **"Select the default treatment"**, choose **off** (banner hidden until you decide)
+7. Click **Review changes** → **Save**
+
+> The flag name `new_checkout_banner` must match `client.getTreatment(user, "new_checkout_banner")` in the app.
+---
+
+# PART B — Deploy the app (CD)
+
+## Step 6: Create the Service (`featureflagsapp`)
+
+1. Harness → **Deployments → Services → + New Service**
+   - Name: `feature-flags-app` → confirm **Id** = `featureflagsapp` → **Save**
+2. **Configuration** → **Deployment Type: Native Helm**
+3. **Manifests → + Add Manifest**:
+   - Manifest Type: **Helm Chart**
+   - Manifest Source / Store: **Github** → `account.Github`
+   - **Manifest Identifier:** `featureflagsapp`
+   - **Git Fetch Type:** `Latest from Branch`
+   - **Branch:** `master`
+   - **Chart Path:** `Episode-12 (Harness Feature Management & Experimentation)/feature-flags-app/helm/feature-flags-app`
+   - **Helm Version:** `Version 3`
+   - Values.yaml: leave blank (the chart already includes its own `values.yaml`)
+   - **Submit**
+4. **Artifacts → + Add Artifact Source → ECR**:
+   - Connector `account.aws_account`, Region your region
+   - **Artifact Source Identifier:** `ecr_image` (must match the pipeline)
+   - Image Path: `feature-flags-app`, Tag: `<+input>` → **Submit**
+5. **Save**
+
+> NativeHelm resolves `<+artifact.image>` in the chart's `values.yaml`. The SDK key is NOT in the chart — it's created as the `ff-secrets` K8s secret by the pipeline's ShellScript step (see Step 4).
+
+---
+
+## Step 7: Create the CD Environment (`production`)
+
+> This is the **Deployment** (CD) environment, separate from the FME environment in Step 2 — same name, different module.
+
+1. Harness → **Deployments → Environments → + New Environment**
+   - Name: `production` → **Id** = `production` → Type: **Production** → **Save**
+
+---
+
+## Step 8: Create the Infrastructure (`k8sdelegate`)
+
+1. Open the `production` environment → **Infrastructure Definitions** → **+ Infrastructure Definition**
+2. Fill in:
+   - Name: `k8sdelegate` → **Id** = `k8sdelegate`
+   - Setup: **Inline**
+   - **Deployment Type: Native Helm** (must MATCH the Service in Step 6 — not Kubernetes)
+   - Infrastructure Type: **Direct Connection → Kubernetes**
+   - **Connector:** `k8sdelegate` (from Episode 6)
+   - **Namespace:** `feature-flags` → **Save**
+
+> ⚠️ The Infrastructure Deployment Type must be the **same** as the Service — both **Native Helm**. A Native Helm service + Kubernetes infra will fail to deploy.
+
+---
+
+## Step 9: Import the Pipeline
+
+1. Harness → **Pipelines → + Create a Pipeline → Import from Git**
+2. Repo: `Harness-CI-CD-Zero-to-Hero`, Branch: `master`
+3. YAML Path: `Episode-12 (Harness Feature Management & Experimentation)/feature-flags-app/.harness/feature-flags-pipeline.yaml`
+4. **Import**
+
+The pipeline has two stages:
+- **build-and-push** (CI): unit tests → Create ECR Repo → BuildAndPushECR
+- **deploy-helm** (CD): HelmDeploy (chart renders secret + deployment + service) → Health Check
+
+> The pipeline references `serviceRef: featureflagsapp`, `environmentRef: production`, `infrastructureDefinitions: k8sdelegate` — the IDs from Steps 6-8. Update them in the YAML if yours differ.
+
+---
+
+## Step 10: Run the Pipeline (Deploy Once)
+
+1. **Run Pipeline** → branch `master`
+2. Flow:
+   ```
+   Stage 1 (build-and-push): Unit Tests → Create ECR Repo → Push Image
+   Stage 2 (deploy-helm): HelmDeploy (secret + deployment + service) → Health Check
+   ```
+3. After deploy: `kubectl get svc -n feature-flags` → open the LoadBalancer URL
+
+The store page loads with the banner **hidden** (treatment = off / control).
+
+---
+
+# PART C — Demo the flag (live, no redeploy)
+
+## Step 11: Demo — Turn the Flag ON
+
+1. FME → **Feature Flags** → `new_checkout_banner` → `production` → **Definition**
+2. Change **"Select the default treatment"** from `off` to **on** → **Review changes** → **Save**
+3. Refresh the app → the green banner appears **instantly** — no redeploy
+
+```
+default treatment off → refresh → no banner
+default treatment on  → refresh → "🎉 NEW: Faster one-click checkout is here!"
+```
+
+---
+
+## Step 12: Demo — Targeting (one user)
+
+1. In the flag → **Definition** → **Targeting** → **Individual targets**
+2. Add key `dev-user` → serve treatment **on** → **Review changes** → **Save**
+3. Test in the browser (the app passes `?user=` as the FME key):
+   - `http://LB-URL/?user=dev-user` → banner ON
+   - `http://LB-URL/?user=random` → banner OFF (default off)
+
+---
+
+## Step 13: Demo — Percentage Rollout (10% → 100%)
+
+1. In the flag → **Targeting** → **Default rule** → set a **percentage split**: 10% `on` / 90% `off`
+2. **Review changes** → **Save**
+3. Different `?user=` keys get bucketed consistently — some see it, most don't
+4. Increase to 50%, then 100%
+
+> FME buckets by the key you pass to `getTreatment`, so the same user always gets the same treatment at a given percentage.
+
+---
+
+## Step 14: Demo — Kill Switch
+
+1. Pretend the feature has a bug → change the **default treatment** back to **off** → **Review changes** → **Save**
+2. Refresh → the banner disappears **instantly for everyone** — no rollback pipeline, no redeploy
+
+---
+
+## Step 15: Cleanup
+
+```bash
+kubectl delete namespace feature-flags
+```
+Delete the flag/environment/SDK key in FME if you want a clean slate. No AWS infra beyond the app.
+
+---
+
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Treatment always `control` | SDK not ready / key wrong | Check `harness_fme_sdk_key` secret + `ff-secrets` K8s secret; must be a **server-side** key |
+| Banner never appears | Flag name mismatch | Must be exactly `new_checkout_banner` in code + FME |
+| App can't reach FME | Client vs server key | Use a **server-side** SDK key for the Node.js app |
+| Changes not instant | SDK refresh | Split SDK polls ~every few seconds; wait a moment and refresh |
+| Pod CrashLoop | Secret not mounted | Confirm `ff-secrets` exists in the `feature-flags` namespace (HelmDeploy creates it) |
+
+---
+
+## What Episode 12 Adds (vs Episode 11)
+
+| | Episode 11 | Episode 12 |
+|---|---|---|
+| Focus | Hosting & reviewing code | Releasing features safely |
+| Product | Harness Code | **FME (Feature Management & Experimentation)** |
+| Release method | Merge + deploy | **Change a treatment — no deploy** |
+| Rollback | Revert PR + redeploy | **Set treatment off instantly** |
+| Rollout control | All at once | **Targeting + % rollout + experiments** |
+
+---
+
+## Key Takeaway
+
+> FME separates **deploy** from **release**. The code ships once; you decide who sees the feature and when via treatments — and you can turn it off in one second if it misbehaves. FME also adds experiments and metrics on top, so you can measure a feature's impact, not just toggle it.
