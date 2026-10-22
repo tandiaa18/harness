@@ -10,7 +10,7 @@
 # PREREQUISITES:
 #   - Harness Cloud enabled (credit card verification, no charge)
 #   - Docker Hub connector created in Harness (account.dockerhub)
-#   - Secret "docker-hub-password" in Harness
+#   - Secret "Harness_Docker" in Harness
 #   - Variable "docker_username" in Harness
 # ============================================
 pipeline:
@@ -151,7 +151,7 @@ pipeline:
                     command: |-
                       echo "=== Step 7: Deleting Docker Hub Image ==="
                       echo ""
-                      TOKEN=$(curl -s -H "Content-Type: application/json" -X POST -d '{"username":"<+variable.docker_username>","password":"<+secrets.getValue("docker-hub-password")>"}' https://hub.docker.com/v2/users/login/ | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+                      TOKEN=$(curl -s -H "Content-Type: application/json" -X POST -d '{"username":"<+variable.docker_username>","password":"<+secrets.getValue("Harness_Docker")>"}' https://hub.docker.com/v2/users/login/ | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
                       echo "Logged in to Docker Hub API"
                       echo ""
                       echo "Deleting entire repository: <+variable.docker_username>/python-harness-app"
